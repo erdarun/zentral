@@ -1,3 +1,4 @@
+from gzip import GzipFile
 import json
 import logging
 import warnings
@@ -125,6 +126,8 @@ class JSONPostAPIView(View):
                    or "santa" in self.user_agent and content_encoding == "zlib" \
                    or self.user_agent == "Zentral/mnkpf 0.1" and content_encoding == "gzip":
                     payload = zlib.decompress(payload)
+                elif content_encoding == "gzip":
+                    payload = GzipFile(fileobj=request).read()
                 else:
                     return HttpResponse("Unsupported Media Type", status=415)
             try:

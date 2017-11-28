@@ -23,9 +23,20 @@ class MonolithSyncCatalogsRequestEvent(BaseEvent):
 register_event_type(MonolithSyncCatalogsRequestEvent)
 
 
+class MonolithUpdateCacheServerRequestEvent(BaseEvent):
+    event_type = "monolith_update_cache_server_request"
+    tags = ["monolith"]
+
+
+register_event_type(MonolithUpdateCacheServerRequestEvent)
+
+
 class MonolithRepositoryUpdateEvent(BaseEvent):
     event_type = "monolith_repository_update"
     tags = ["monolith"]
+    payload_aggregations = [
+        ("action", {"type": "terms", "bucket_number": 4, "label": "Decisions"}),
+    ]
 
 
 register_event_type(MonolithRepositoryUpdateEvent)
@@ -48,6 +59,26 @@ def post_monolith_sync_catalogs_request(user_agent, ip):
                              request=request,
                              tags=event_class.tags)
     event = event_class(metadata, {})
+    event.post()
+
+
+def post_monolith_cache_server_update_request(user_agent, ip, cache_server=None, errors=None):
+    event_class = MonolithUpdateCacheServerRequestEvent
+    if user_agent or ip:
+        request = EventRequest(user_agent, ip)
+    else:
+        request = None
+    metadata = EventMetadata(event_class.event_type,
+                             request=request,
+                             tags=event_class.tags)
+    if cache_server:
+        payload = cache_server.serialize()
+        payload["status"] = 0
+    else:
+        # flatten errors
+        payload = {"errors": {attr: ", ".join(err) for attr, err in errors.items()}}
+        payload["status"] = 1
+    event = event_class(metadata, payload)
     event.post()
 
 

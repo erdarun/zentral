@@ -282,7 +282,7 @@ class PackageBuilder(BasePackageBuilder, APIConfigToolsMixin):
         input_path = self.get_build_path(dirname)
         output_path = self.get_build_path("base.pkg", arch_name)
         check_call('(cd "{}" && find . | '
-                   'cpio -o --quiet --format odc --owner 0:80 | '
+                   'cpio -o --quiet --format odc --owner 0:0 | '
                    'gzip -c) > "{}"'.format(input_path, output_path), shell=True)
 
     def _build_payload(self):
@@ -292,7 +292,7 @@ class PackageBuilder(BasePackageBuilder, APIConfigToolsMixin):
         self._build_gziped_cpio_arch("scripts", "Scripts")
 
     def _build_bom(self):
-        check_call(["/usr/bin/mkbom", "-u", "0", "-g", "80",
+        check_call(["/usr/bin/mkbom", "-u", "0", "-g", "0",
                     self.get_root_path(),
                     self.get_build_path("base.pkg", "Bom")])
 
@@ -326,7 +326,7 @@ class PackageBuilder(BasePackageBuilder, APIConfigToolsMixin):
         product_archive_title = self.get_product_archive_title()
         extra_packages = self.get_extra_packages()
 
-        if product_archive or extra_packages:
+        if product_archive or product_archive_title or extra_packages:
             # build a product archive
             builder = ProductArchiveBuilder(product_archive_title, product_archive)
             for extra_package in extra_packages:
@@ -364,6 +364,8 @@ class PackageBuilder(BasePackageBuilder, APIConfigToolsMixin):
             f.write(content)
 
     def set_plist_keys(self, filename, keyvals):
+        if not keyvals:
+            return
         with open(filename, "rb") as f:
             pl = plistlib.load(f)
         for key, val in keyvals:
@@ -371,10 +373,13 @@ class PackageBuilder(BasePackageBuilder, APIConfigToolsMixin):
         with open(filename, "wb") as f:
             plistlib.dump(pl, f)
 
-    def append_to_plist_key(self, filename, key, val):
+    def append_to_plist_key(self, filename, key, values):
+        if not values:
+            return
         with open(filename, "rb") as f:
             pl = plistlib.load(f)
-        pl.setdefault(key, []).append(val)
+        for val in values:
+            pl.setdefault(key, []).append(val)
         with open(filename, "wb") as f:
             plistlib.dump(pl, f)
 

@@ -3,12 +3,13 @@ import logging
 import os.path
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.core import signing
+from django.core.exceptions import SuspiciousOperation
 from django.core.urlresolvers import reverse_lazy
 from django.db.models import F
 from django.http import (FileResponse,
                          Http404,
                          HttpResponse, HttpResponseForbidden, HttpResponseNotFound, HttpResponseRedirect)
-from django.shortcuts import get_object_or_404
+from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
 from django.views.generic import DetailView, ListView, TemplateView, View
 from django.views.generic.edit import CreateView, DeleteView, FormView, UpdateView
@@ -18,14 +19,21 @@ from zentral.utils.api_views import (API_SECRET,
                                      SignedRequestHeaderJSONPostAPIView)
 from zentral.utils.http import user_agent_and_ip_address_from_request
 from .conf import monolith_conf
-from .events import post_monolith_munki_request, post_monolith_repository_updates, post_monolith_sync_catalogs_request
+from .events import (post_monolith_cache_server_update_request,
+                     post_monolith_munki_request, post_monolith_repository_updates,
+                     post_monolith_sync_catalogs_request)
 from .forms import (AddManifestCatalogForm, DeleteManifestCatalogForm,
                     AddManifestEnrollmentPackageForm,
-                    AddManifestSubManifestForm, DeleteManifestSubManifestForm,
-                    ManifestForm,
+                    AddManifestSubManifestForm,
+                    CacheServersPostForm,
+                    ConfigureCacheServerForm,
+                    DeleteManifestSubManifestForm,
+                    ManifestForm, ManifestPrinterForm,
                     PkgInfoSearchForm, UpdatePkgInfoCatalogForm,
-                    SubManifestPkgInfoForm, SubManifestAttachmentForm, SubManifestScriptForm)
-from .models import (Catalog, Manifest, ManifestEnrollmentPackage, PkgInfo, PkgInfoName,
+                    SubManifestPkgInfoForm, SubManifestAttachmentForm, SubManifestScriptForm,
+                    UploadPPDForm)
+from .models import (Catalog, CacheServer, Manifest, ManifestEnrollmentPackage, PkgInfo, PkgInfoName,
+                     Printer, PrinterPPD,
                      SUB_MANIFEST_PKG_INFO_KEY_CHOICES, SubManifest, SubManifestAttachment, SubManifestPkgInfo)
 from .osx_package.builder import MunkiMonolithConfigPkgBuilder
 from .utils import build_manifest_enrollment_package
@@ -109,6 +117,32 @@ class PkgInfoNameView(LoginRequiredMixin, DetailView):
                                                          .filter(archived_at__isnull=True))
         # to display update catalog links or not
         ctx["manual_catalog_management"] = monolith_conf.repository.manual_catalog_management
+        return ctx
+
+
+# PPDs
+
+
+class PPDsView(LoginRequiredMixin, ListView):
+    model = PrinterPPD
+
+
+class UploadPPDView(LoginRequiredMixin, CreateView):
+    model = PrinterPPD
+    form_class = UploadPPDForm
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["title"] = "Upload PPD file"
+        return ctx
+
+
+class PPDView(LoginRequiredMixin, DetailView):
+    model = PrinterPPD
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["printers"] = list(ctx["object"].printer_set.filter(trashed_at__isnull=True))
         return ctx
 
 
@@ -533,9 +567,14 @@ class ManifestView(LoginRequiredMixin, DetailView):
         context['monolith'] = True
         context['manifest_enrollment_packages'] = list(manifest.manifestenrollmentpackage_set.all())
         context['manifest_enrollment_packages'].sort(key=lambda mep: (mep.get_optional(), mep.get_name(), mep.id))
+        context['manifest_cache_servers'] = list(manifest.cacheserver_set.all().order_by("name"))
         context['manifest_catalogs'] = list(manifest.manifestcatalog_set
                                                     .prefetch_related("tags")
                                                     .select_related("catalog").all())
+        context['manifest_printers'] = list(manifest.printer_set
+                                                    .prefetch_related("tags")
+                                                    .select_related("ppd")
+                                                    .filter(trashed_at__isnull=True))
         context['manifest_sub_manifests'] = list(manifest.manifestsubmanifest_set
                                                          .prefetch_related("tags")
                                                          .select_related("sub_manifest").all())
@@ -732,6 +771,81 @@ class DeleteManifestEnrollmentPackageView(LoginRequiredMixin, TemplateView):
         return HttpResponseRedirect(redirect_url)
 
 
+# manifest printers
+
+
+class AddManifestPrinterView(LoginRequiredMixin, CreateView):
+    model = Printer
+    form_class = ManifestPrinterForm
+    template_name = "monolith/manifest_printer_form.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        self.manifest = get_object_or_404(Manifest, pk=kwargs["m_pk"])
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["manifest"] = self.manifest
+        return ctx
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs['manifest'] = self.manifest
+        return kwargs
+
+    def form_valid(self, form):
+        printer = form.save(commit=False)
+        printer.manifest = self.manifest
+        printer.save()
+        form.save_m2m()
+        return HttpResponseRedirect("{}#printers".format(self.manifest.get_absolute_url()))
+
+
+class UpdateManifestPrinterView(LoginRequiredMixin, UpdateView):
+    model = Printer
+    form_class = ManifestPrinterForm
+    template_name = "monolith/manifest_printer_form.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        self.manifest = get_object_or_404(Manifest, pk=kwargs["m_pk"])
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["manifest"] = self.manifest
+        return ctx
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs['manifest'] = self.manifest
+        return kwargs
+
+    def get_success_url(self):
+        return "{}#printers".format(self.manifest.get_absolute_url())
+
+
+class DeleteManifestPrinterView(LoginRequiredMixin, DeleteView):
+    model = Printer
+    template_name = "monolith/delete_manifest_printer.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        self.manifest = get_object_or_404(Manifest, pk=kwargs["m_pk"])
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["manifest"] = self.manifest
+        return ctx
+
+    def delete(self, request, *args, **kwargs):
+        self.object = self.get_object()
+        self.object.mark_as_trashed()
+        return HttpResponseRedirect("{}#printers".format(self.manifest.get_absolute_url()))
+
+
+# manifest sub manifests
+
+
 class AddManifestSubManifestView(BaseManifestM2MView):
     form_class = AddManifestSubManifestForm
     template_name = "monolith/add_manifest_sub_manifest.html"
@@ -746,6 +860,34 @@ class DeleteManifestSubManifestView(BaseManifestM2MView):
         return {'sub_manifest': self.m2m_object}
 
 
+class ConfigureManifestCacheServerView(LoginRequiredMixin, FormView):
+    form_class = ConfigureCacheServerForm
+    template_name = "monolith/configure_manifest_cache_server.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        self.manifest = get_object_or_404(Manifest, pk=kwargs["pk"])
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["monolith"] = True
+        ctx["manifest"] = self.manifest
+        return ctx
+
+    def form_valid(self, form):
+        ctx = self.get_context_data()
+        ctx["curl_command"] = form.build_curl_command(self.manifest)
+        return render(self.request, 'monolith/manifest_cache_server_setup.html', ctx)
+
+
+class DeleteManifestCacheServerView(LoginRequiredMixin, View):
+    def post(self, request, *args, **kwargs):
+        cache_server = get_object_or_404(CacheServer, pk=kwargs["cs_pk"], manifest__pk=kwargs["pk"])
+        manifest = cache_server.manifest
+        cache_server.delete()
+        return HttpResponseRedirect("{}#cache-servers".format(manifest.get_absolute_url()))
+
+
 # API
 
 
@@ -756,6 +898,37 @@ class SyncCatalogsView(SignedRequestHeaderJSONPostAPIView):
         post_monolith_sync_catalogs_request(self.user_agent, self.ip)
         monolith_conf.repository.sync_catalogs()
         return {'status': 0}
+
+
+class CacheServersView(SignedRequestHeaderJSONPostAPIView):
+    verify_module = "zentral.contrib.monolith"
+
+    def do_post(self, data):
+        form = CacheServersPostForm(data)
+        if form.is_valid():
+            manifest = get_object_or_404(Manifest, meta_business_unit=self.business_unit.meta_business_unit)
+            cache_server = form.save(manifest, self.ip)
+            post_monolith_cache_server_update_request(self.user_agent, self.ip, cache_server=cache_server)
+            return {'status': 0}
+        else:
+            post_monolith_cache_server_update_request(self.user_agent, self.ip, errors=form.errors)
+            # TODO: JSON response with error code and form.errors.as_json()
+            print(form.errors)
+            raise SuspiciousOperation("Posted json data invalid")
+
+
+class DownloadPrinterPPDView(View):
+    def get(self, request, *args, **kwargs):
+        try:
+            printer_ppd = PrinterPPD.objects.get_with_token(kwargs["token"])
+        except ValueError:
+            logger.error("Invalid token %s", kwargs["token"])
+            raise Http404
+        except PrinterPPD.DoesNotExist:
+            logger.warning("Could not find printer PPD with token %s", kwargs["token"])
+            raise Http404
+        else:
+            return FileResponse(printer_ppd.file)
 
 
 # managedsoftwareupdate API
@@ -822,6 +995,12 @@ class MRCatalogView(MRSignedView):
             mbu_id = int(key)
             if mbu_id == self.meta_business_unit.id:
                 catalog_data = self.manifest.serialize_enrollment_catalog(self.tags)
+        elif model == "printer_catalog":
+            # intercept calls for special printer catalog
+            mbu_id = int(key)
+            if mbu_id == self.meta_business_unit.id:
+                # do not filter with tags. need all the possible installs for autoremove.
+                catalog_data = self.manifest.serialize_printer_catalog()
         elif model == "sub_manifest_catalog":
             # intercept calls for sub manifest catalog
             sm_id = int(key)
@@ -929,8 +1108,10 @@ class MRPackageView(MRSignedView):
                 if pkginfo.pk == pk:
                     event_payload["repository_package"].update({"name": pkginfo.name.name,
                                                                 "version": pkginfo.version})
+                    cache_server = CacheServer.objects.get_current_for_manifest_and_ip(self.manifest, self.ip)
                     return monolith_conf.repository.make_munki_repository_response(
-                        "pkgs", pkginfo.data["installer_item_location"]
+                        "pkgs", pkginfo.data["installer_item_location"],
+                        cache_server=cache_server
                     )
 
 

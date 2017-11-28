@@ -35,7 +35,7 @@ TYPE_CHOICES_DICT = dict(TYPE_CHOICES)
 
 # utils
 
-HARDWARE_MODEL_MACHINE_TYPE_DICT = {
+HARDWARE_MODEL_SERIAL_MACHINE_TYPE_DICT = {
     'imac': DESKTOP,
     'ipad': TABLET,
     'iphone': MOBILE,
@@ -59,37 +59,43 @@ KNOWN_VM_MAC_PREFIXES = {
 }
 
 
-def update_ms_tree_platform(tree):
-    os_version_t = tree.get("os_version", {})
-    os_name = os_version_t.get("name")
+def platform_with_os_name(os_name):
     if not os_name:
         return
     os_name = os_name.lower().replace(" ", "")
     if "macos" in os_name or "osx" in os_name:
-        tree["platform"] = MACOS
+        return MACOS
     elif "ios" in os_name:
-        tree["platform"] = IOS
+        return IOS
     elif "windows" in os_name:
-        tree["platform"] = WINDOWS
+        return WINDOWS
     else:
         for distro in ('centos', 'fedora', 'redhat', 'rehl',
                        'debian', 'ubuntu',
                        'gentoo',
                        'linux'):
             if distro in os_name:
-                tree["platform"] = LINUX
-                break
+                return LINUX
+
+
+def update_ms_tree_platform(tree):
+    os_version_t = tree.get("os_version", {})
+    os_name = os_version_t.get("name")
+    platform = platform_with_os_name(os_name)
+    if platform:
+        tree["platform"] = platform
 
 
 def update_ms_tree_type(tree):
     system_info_t = tree.get("system_info", {})
-    hardware_model = system_info_t.get("hardware_model")
-    if hardware_model:
-        hardware_model = hardware_model.lower()
-        for prefix, ms_type in HARDWARE_MODEL_MACHINE_TYPE_DICT.items():
-            if hardware_model.startswith(prefix):
-                tree["type"] = ms_type
-                return
+    for attr in ("hardware_model", "hardware_serial"):
+        val = system_info_t.get(attr)
+        if val:
+            val = val.lower()
+            for prefix, ms_type in HARDWARE_MODEL_SERIAL_MACHINE_TYPE_DICT.items():
+                if val.startswith(prefix):
+                    tree["type"] = ms_type
+                    return
     network_interfaces = tree.get("network_interfaces")
     if network_interfaces and \
        all(isinstance(ni.get("mac"), str) and ni["mac"].replace(":", "")[:6].upper() in KNOWN_VM_MAC_PREFIXES

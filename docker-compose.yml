@@ -21,7 +21,7 @@ services:
     volumes:
       - prometheus_sd:/prometheus_sd
   nginx:
-    image: nginx:mainline-alpine
+    image: nginx:stable
     ports:
       - "443:443"
     depends_on:
@@ -53,6 +53,7 @@ services:
       - elastic
       - rabbitmq
     volumes:
+      - web_media_root:/var/zentral
       - prometheus_sd:/prometheus_sd
 
 networks:

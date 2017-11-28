@@ -1,12 +1,18 @@
+import json
 from django import forms
 from django.db import IntegrityError, transaction
 from django.db.models import F, Max, Q
+from django.urls import reverse
+from zentral.conf import settings
 from zentral.contrib.inventory.models import MetaBusinessUnit, Tag
+from zentral.utils.api_views import make_secret
 from .attachments import MobileconfigFile, PackageFile
 from .exceptions import AttachmentError
-from .models import (Catalog, Manifest, ManifestCatalog, ManifestSubManifest,
+from .models import (CacheServer, Catalog, Manifest, ManifestCatalog, ManifestSubManifest,
+                     Printer, PrinterPPD,
                      PkgInfo, PkgInfoName, SubManifest,
                      SubManifestPkgInfo, SubManifestAttachment)
+from .ppd import get_ppd_information
 
 
 class PkgInfoSearchForm(forms.Form):
@@ -251,6 +257,22 @@ class AddManifestEnrollmentPackageForm(forms.Form):
         field.queryset = Tag.objects.available_for_meta_business_unit(self.manifest.meta_business_unit)
 
 
+class ManifestPrinterForm(forms.ModelForm):
+    def __init__(self, *args, **kwargs):
+        self.manifest = kwargs.pop('manifest')
+        super().__init__(*args, **kwargs)
+        field = self.fields['tags']
+        field.queryset = Tag.objects.available_for_meta_business_unit(self.manifest.meta_business_unit)
+
+    class Meta:
+        model = Printer
+        fields = ["tags",
+                  "name", "location",
+                  "scheme", "address",
+                  "shared", "error_policy", "ppd",
+                  "required_package"]
+
+
 class AddManifestSubManifestForm(forms.Form):
     sub_manifest = forms.ModelChoiceField(queryset=SubManifest.objects.all())
     tags = forms.ModelMultipleChoiceField(queryset=Tag.objects.none(), required=False)
@@ -288,3 +310,57 @@ class DeleteManifestSubManifestForm(forms.Form):
                                                                sub_manifest=self.cleaned_data['sub_manifest']).delete()
         if number_deleted:
             self.manifest.save()  # updated_at
+
+
+class CacheServerBaseForm(forms.Form):
+    name = forms.CharField(max_length=256)
+    base_url = forms.URLField(label="base URL")
+
+
+class CacheServersPostForm(CacheServerBaseForm):
+    def save(self, manifest, public_ip_address):
+        cd = self.cleaned_data
+        cache_server, _ = CacheServer.objects.update_or_create(
+            name=cd["name"],
+            manifest=manifest,
+            defaults={"public_ip_address": public_ip_address,
+                      "base_url": cd["base_url"]}
+        )
+        return cache_server
+
+
+class ConfigureCacheServerForm(CacheServerBaseForm):
+    def build_curl_command(self, manifest):
+        business_unit = manifest.meta_business_unit.api_enrollment_business_units()[0]
+        api_secret = make_secret('zentral.contrib.monolith', business_unit)
+        json_payload = json.dumps(self.cleaned_data)
+        tls_hostname = settings["api"]["tls_hostname"]
+        path = reverse("monolith:cache_servers")
+        # TODO: what if there is a ' in the json payload ?
+        return ("curl -XPOST "
+                "-H 'Zentral-API-Secret: {api_secret}' "
+                "-d '{json_payload}' "
+                "{tls_hostname}{path}").format(api_secret=api_secret,
+                                               json_payload=json_payload,
+                                               tls_hostname=tls_hostname,
+                                               path=path)
+
+
+class UploadPPDForm(forms.ModelForm):
+    class Meta:
+        model = PrinterPPD
+        fields = ['file']
+
+    def clean_file(self):
+        f = self.cleaned_data["file"]
+        try:
+            self.cleaned_data["ppd_info"] = get_ppd_information(f)
+        except:
+            raise forms.ValidationError("Could not parse PPD file %s." % f.name)
+        return f
+
+    def save(self, *args, **kwargs):
+        ppd = PrinterPPD.objects.create(**self.cleaned_data["ppd_info"])
+        uploaded_file = self.cleaned_data["file"]
+        ppd.file.save(uploaded_file.name, uploaded_file)
+        return ppd
